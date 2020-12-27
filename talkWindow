@@ -1,0 +1,271 @@
+import 'package:TOMONAYA/dataHolders/BoshuData.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/rendering.dart';
+import 'package:fluttertoast/fluttertoast.dart';
+import 'package:TOMONAYA/dataHolders/SoudanToken.dart';
+import 'package:TOMONAYA/dataHolders/UserData.dart';
+import 'package:TOMONAYA/service/Authentication.dart';
+import 'package:flutter/gestures.dart';
+import 'package:jiffy/jiffy.dart';
+import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:TOMONAYA/globals/Globals.dart' as Globals;
+import 'package:TOMONAYA/globals/Theme.dart';
+import 'package:TOMONAYA/pages/LoginPage.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:flutter_cupertino_date_picker/flutter_cupertino_date_picker.dart';
+import 'package:TOMONAYA/pages/HomePage.dart';
+import 'package:TOMONAYA/dataHolders/Points.dart';
+import 'package:time_machine/time_machine.dart';
+import 'package:TOMONAYA/dataHolders/SearchCondition.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:TOMONAYA/pages/NumberInput.dart';
+import 'package:TOMONAYA/pages/CustomKeywordInput.dart';
+import 'package:TOMONAYA/pages/SoudaninDetailPage.dart';
+import 'package:TOMONAYA/pages/CustomIdeaInput.dart';
+import 'package:TOMONAYA/pages/ConfirmBpshuDialog.dart';
+import 'package:TOMONAYA/pages/CustomInfoDialogue.dart';
+import 'package:TOMONAYA/dataHolders/BoshuApplyData.dart';
+import 'package:TOMONAYA/dataHolders/LikesUser.dart';
+import 'package:TOMONAYA/pages/CustomYesNoDialog.dart';
+import 'dart:async';
+import 'package:agora_rtc_engine/rtc_channel.dart';
+import 'package:agora_rtc_engine/rtc_engine.dart';
+import 'package:agora_rtc_engine/rtc_local_view.dart';
+import 'package:agora_rtc_engine/rtc_remote_view.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+
+class TalkWindow extends StatefulWidget {
+  TalkWindow ({this.userData,this.token});
+
+  SoudanToken token;
+  UserData userData;
+  @override
+  _TalkWindowState createState() => _TalkWindowState();
+}
+
+//ログインページ
+class _TalkWindowState extends State<TalkWindow> {
+  final databaseReference = FirebaseFirestore.instance;
+  final GlobalKey<ScaffoldState> _scaffoldKey = new GlobalKey<ScaffoldState>();
+
+  ScrollController _scrollController = ScrollController(
+      initialScrollOffset: 0.0, keepScrollOffset: true);
+  bool isLoading = false;
+
+  
+  bool _joined = false;
+  int _remoteUid = null;
+  RtcEngine engine;
+  ConnectionStateType type;
+
+  
+  int joinedUserCount=0;
+  bool isTalkEnd=false;
+  Future<void> initialConnectToRTC() async {
+
+    lastSeconds=widget.token.timeMinutes*60;
+
+    await [Permission.microphone]
+        .request();
+
+    engine = await RtcEngine.create("19a67fc4fae24e3d8127999950dddac3");
+
+    engine.setEventHandler(RtcEngineEventHandler(
+
+        error: (code) {
+      setState(() {
+        final info = 'onError: $code';
+        print(info);
+      });
+    },
+      rtcStats: (RtcStats stats){
+
+        print("rtcStats"+stats.users.toString());
+
+
+
+      },
+      connectionStateChanged: (ConnectionStateType type,ConnectionChangedReason reason){
+
+        print("connectionStateChanged"+type.toString());
+        if(this.type!=type){
+          setState(() {
+            this.type=type;
+
+            switch(type){
+              case ConnectionStateType.Connecting:
+                break;
+              case ConnectionStateType.Connected:
+                break;
+              case ConnectionStateType.Disconnected:
+                tryJoinChannel();
+                break;
+              case ConnectionStateType.Failed:
+                tryJoinChannel();
+                break;
+            }
+
+          });
+        }
+
+      },
+        joinChannelSuccess: (String channel, int uid, int elapsed) {
+          print('joinChannelSuccess ${channel} ${uid}');
+          setState(() {
+            _joined = true;
+          });
+        }, userJoined: (int uid, int elapsed) {
+      print('userJoined ${uid}');
+      setState(() {
+        _remoteUid = uid;
+      });
+    }, userOffline: (int uid, UserOfflineReason reason) {
+      print('userOffline ${uid}');
+      setState(() {
+        _remoteUid = null;
+      });
+    }));
+
+    tryJoinChannel();
+
+  }
+
+  void tryJoinChannel() async{
+
+    if(engine==null || isTalkEnd)return;
+
+    print("tryJoinChannel");
+
+
+    String token="";
+    if(isSoudnain()){
+
+      if(widget.token.soudaninToken==""){
+        token=await fetchToken(widget.token.soudanToken, 10800);
+        widget.token.soudaninToken=token;
+
+        await databaseReference.collection("SoudanTokens").doc(widget.token.soudanToken).update({"soudaninToken":token,});
+
+      }else{
+        token=widget.token.soudaninToken;
+      }
+
+
+    }else{
+      if(widget.token.soudanshaToken==""){
+        token=await fetchToken(widget.token.soudanToken, 10800);
+        widget.token.soudanshaToken=token;
+
+        await databaseReference.collection("soudanshaToken").doc(widget.token.soudanToken).update({"soudanshaToken":token,});
+      }else{
+        token=widget.token.soudanshaToken;
+      }
+
+
+
+    }
+    
+    await engine.joinChannel(token,widget.token.soudanToken, null, 0).whenComplete((){
+      print("tryJoinChannel sucess");
+    }).catchError((er){
+
+    });
+
+  }
+
+
+  Future<String> fetchToken(String name,int seconds) async {
+
+    String url=Globals.tokenURL+"access_token?channelName="+name+"&expireTime="+seconds.toString();
+    final response = await http.get(url);
+
+    if (response.statusCode == 200) {
+      Map<String, dynamic> jsonMap = jsonDecode(response.body);
+      return jsonMap['token'];
+    } else {
+      // If that call was not successful, throw an error.
+      return null;
+    }
+  }
+
+
+
+  void tryLeaveChannel(bool isClose) async{
+    if(!isTalkEnd)return;
+
+    if(engine!=null){
+
+     await engine.leaveChannel().whenComplete((){
+          engine.destroy();
+          engine=null;
+          if(isClose)Navigator.of(context).pop(talkState);
+     }).catchError((er){
+
+     });
+
+    }
+
+  }
+
+  @override
+  void initState() {
+   
+    initialConnectToRTC();
+    super.initState();
+  }
+
+
+  @override
+  void dispose() {
+    super.dispose();
+    tryLeaveChannel(false);
+  }
+
+  
+
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: () async{
+
+        return false;
+      },
+      child: Stack(
+          children: <Widget>[
+            Scaffold(
+              key: _scaffoldKey,
+              backgroundColor: backgroundColor,
+              body: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: <Widget>[
+                    ListView(
+                      shrinkWrap: true,
+                      children: [
+                        SizedBox(height: 50,),
+
+                        showOpponentCard(),
+                        SizedBox(height: 10,),
+                        showInfo(),
+                        SizedBox(height: 10,),
+                        showTalkInfo(),
+                      ],
+                    ),
+                    Container(height: bottomHeight,),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+  }
+
+
+}
